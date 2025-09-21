@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aslam Ansari Ultra AI Signals</title>
+<link rel="manifest" href="manifest.json">
+<style>
+body{margin:0;font-family:Poppins,sans-serif;background:#121212;color:white;}
+header{text-align:center;padding:15px;font-size:28px;font-weight:bold;background:linear-gradient(90deg,#ff6ec7,#ffcb6e,#6effa0);-webkit-background-clip:text;color:transparent;}
+#timeframe{margin:10px;padding:5px;border-radius:5px;}
+#chart{height:60vh;width:100%;border-radius:10px;margin-bottom:8px;}
+#signalPanel,#trendPanel,#nextCandlePanel,#patternPanel{text-align:center;padding:12px;font-size:20px;font-weight:bold;border-radius:8px;margin:5px 10px;}
+.buy{color:#4caf50;}.sell{color:#f44336;}.hold{color:#ffeb3b;}
+.uptrend{color:#00ff00;}.downtrend{color:#ff0000;}.sideways{color:#ffff00;}
+.bullish{color:#00ffcc;}.bearish{color:#ff6600;}
+.signalPanel{background: rgba(255,255,255,0.05);}
+.trendPanel{background: rgba(255,255,255,0.05);}
+.nextCandlePanel{background: rgba(255,255,255,0.05);}
+.patternPanel{background: rgba(255,255,255,0.05);}
+.tooltip{position:absolute;background:rgba(0,0,0,0.85);color:white;padding:6px;border-radius:4px;font-size:12px;pointer-events:none;}
+</style>
+</head>
+<body>
+<header>Aslam Ansari</header>
+<div style="text-align:center;">
+<select id="timeframe">
+<option value="1m">1m</option>
+<option value="5m">5m</option>
+<option value="15m">15m</option>
+<option value="1h">1h</option>
+<option value="4h">4h</option>
+<option value="1d">1d</option>
+</select>
+</div>
+<div id="chart"></div>
+<div id="signalPanel" class="signalPanel">Loading AI signals...</div>
+<div id="trendPanel" class="trendPanel">Loading AI trend...</div>
+<div id="nextCandlePanel" class="nextCandlePanel">Predicting next candle...</div>
+<div id="patternPanel" class="patternPanel">Detecting pattern...</div>
+<div id="tooltip" class="tooltip" style="display:none;"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+// ---------------- Chart Setup ----------------
+const chart = LightweightCharts.createChart(document.getElementById('chart'),{
+layout:{background:{color:'#121212'},textColor:'white'},
+grid:{vertLines:{color:'#222'},horzLines:{color:'#222'}}
+});
+const candleSeries = chart.addCandlestickSeries({upColor:'#4caf50',downColor:'#f44336',borderVisible:false});
+const ema10Series = chart.addLineSeries({color:'#ff9800',lineWidth:2});
+const ema30Series = chart.addLineSeries({color:'#03a9f4',lineWidth:2});
+const sma20Series = chart.addLineSeries({color:'#ffc107',lineWidth:2});
+const bbUpperSeries = chart.addLineSeries({color:'#00ffff',lineWidth:1});
+const bbLowerSeries = chart.addLineSeries({color:'#ff00ff',lineWidth:1});
+const vwapSeries = chart.addLineSeries({color:'#ffd700',lineWidth:2});
+
+// ---------------- Panels ----------------
+const signalPanel = document.getElementById("signalPanel");
+const trendPanel = document.getElementById("trendPanel");
+const nextCandlePanel = document.getElementById("nextCandlePanel");
+const patternPanel = document.getElementById("patternPanel");
+const timeframeEl = document.getElementById("timeframe");
+const tooltip = document.getElementById("tooltip");
+
+// ---------------- Candle Storage ----------------
+let candles=[], prevEMA10=null, prevEMA30=null;
+let ws;
+
+// ---------------- Indicators ----------------
+function incrementalEMA(prevEMA, price, period){let k=2/(period+1); return price*k + prevEMA*(1-k);}
+function SMA(values, period){let sma=[]; for(let i=0;i<values.length;i++){if(i<period-1){sma.push(values[i]); continue;} let sum=0; for(let j=0;j<period;j++) sum+=values[i-j]; sma.push(sum/period);} return sma;}
+function Bollinger(values, period=20, std=2){let sma=SMA(values,period), upper=[], lower=[]; for(let i=0;i<values.length;i++){if(i<period-1){upper.push(values[i]); lower.push(values[i]); continue;} let sum=0; for(let j=0;j<period;j++) sum+=(values[i-j]-sma[i])**2; let sd=Math.sqrt(sum/period); upper.push(sma[i]+std*sd); lower.push(sma[i]-std*sd);} return {upper,lower};}
+function RSI(values, period=14){let rsi=[]; for(let i=0;i<values.length;i++){if(i<period){rsi.push(50); continue;} let gains=0, losses=0; for(let j=i-period+1;j<=i;j++){let change=values[j]-(j-1>=0?values[j-1]:values[j]); if(change>0) gains+=change; else losses-=change;} let avgG=gains/period, avgL=losses/period; let rs=avgL===0?100:avgG/avgL; rsi.push(100-(100/(1+rs)));} return rsi;}
+function VWAP(candles){let cumPV=0,cumVol=0,vwapArr=[];for(let c of candles){let vol=c.volume; let typical=(c.high+c.low+c.close)/3; cumPV+=typical*vol; cumVol+=vol; vwapArr.push(cumPV/cumVol);} return vwapArr;}
+
+// ---------------- WebSocket ----------------
+function startWebSocket(interval){
+  if(ws) ws.close();
+  ws=new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${interval}`);
+  ws.onmessage=evt=>{
+    const data=JSON.parse(evt.data).k;
+    const candle={time:data.t/1000,open:+data.o,high:+data.h,low:+data.l,close:+data.c,volume:+data.v};
+    addCandle(candle);
+  };
+}
+
+// ---------------- Add Candle ----------------
+function addCandle(c){if(candles.length>500) candles.shift(); candles.push(c); updateUltraAISignals();}
+
+// ---------------- Ultra AI Signal ----------------
+function updateUltraAISignals(){
+  if(candles.length<30) return;
+  const closes=candles.map(c=>c.close);
+  const ema10=[], ema30=[], sma20=SMA(closes,20);
+  prevEMA10 = null; prevEMA30 = null;
+  for(let i=0;i<closes.length;i++){
+    prevEMA10=i===0?closes[0]:incrementalEMA(prevEMA10,closes[i],10);
+    prevEMA30=i===0?closes[0]:incrementalEMA(prevEMA30,closes[i],30);
+    ema10.push(prevEMA10); ema30.push(prevEMA30);
+  }
+  const bb=Bollinger(closes,20,2), rsi=RSI(closes,14), vwap=VWAP(candles);
+  const lastPrice=closes[closes.length-1];
+  const lastEMA10=ema10[ema10.length-1], lastEMA30=ema30[ema30.length-1];
+  const lastSMA20=sma20[sma20.length-1], lastBB={upper:bb.upper[bb.upper.length-1], lower:bb.lower[bb.lower.length-1]};
+  const lastRSI=rsi[rsi.length-1], lastVWAP=vwap[vwap.length-1];
+  const emaSlope=lastEMA10-ema10[Math.max(ema10.length-6,0)];
+
+  // ---------------- AI Fusion Signal ----------------
+  let signal="Hold", conf=50, weight=0;
+  if(lastPrice>lastEMA10) weight+=0.25; else weight-=0.25;
+  if(lastPrice>lastEMA30) weight+=0.25; else weight-=0.25;
+  if(lastPrice>lastVWAP) weight+=0.2; else weight-=0.2;
+  if(lastRSI>55) weight+=0.15; else if(lastRSI<45) weight-=0.15;
+  if(lastPrice>lastSMA20) weight+=0.15; else weight-=0.15;
+  if (weight > 0.55) {
+    signal = "Buy";
+    conf = 70 + Math.min(30, weight * 100);
+  } else if (weight < -0.55) {
+    signal = "Sell";
+    conf = 70 + Math.min(30, Math.abs(weight) * 100);
+  } else {
+    signal = "Hold";
+    conf = 50 + Math.min(20, Math.abs(weight) * 100);
+  }
+
+  // ---------------- Trend Detection ----------------
+  let trend = "Sideways";
+  if (emaSlope > 0.2 && lastEMA10 > lastEMA30) trend = "Uptrend";
+  else if (emaSlope < -0.2 && lastEMA10 < lastEMA30) trend = "Downtrend";
+
+  // ---------------- Next Candle Prediction ----------------
+  let nextCandle = "Neutral";
+  if (lastPrice > lastEMA10 && lastRSI < 70) nextCandle = "Bullish";
+  else if (lastPrice < lastEMA10 && lastRSI > 30) nextCandle = "Bearish";
+
+  // ---------------- Pattern Detection ----------------
+  let pattern = "No clear pattern";
+  const last2 = closes.slice(-2);
+  if (last2[1] > last2[0] && last2[0] < lastEMA10) pattern = "Reversal Up";
+  if (last2[1] < last2[0] && last2[0] > lastEMA10) pattern = "Reversal Down";
+
+  // ---------------- Update Panels ----------------
+  signalPanel.innerHTML = `AI Signal: <span class="${signal.toLowerCase()}">${signal}</span> (Confidence: ${conf.toFixed(1)}%)`;
+  trendPanel.innerHTML = `Trend: <span class="${trend.toLowerCase()}">${trend}</span>`;
+  nextCandlePanel.innerHTML = `Next Candle Prediction: <span class="${nextCandle.toLowerCase()}">${nextCandle}</span>`;
+  patternPanel.innerHTML = `Pattern: <span class="${pattern.toLowerCase()}">${pattern}</span>`;
+
+  // ---------------- Update Chart ----------------
+  candleSeries.setData(candles);
+  ema10Series.setData(candles.map((c, i) => ({ time: c.time, value: ema10[i] })));
+  ema30Series.setData(candles.map((c, i) => ({ time: c.time, value: ema30[i] })));
+  sma20Series.setData(candles.map((c, i) => ({ time: c.time, value: sma20[i] })));
+  bbUpperSeries.setData(candles.map((c, i) => ({ time: c.time, value: bb.upper[i] })));
+  bbLowerSeries.setData(candles.map((c, i) => ({ time: c.time, value: bb.lower[i] })));
+  vwapSeries.setData(candles.map((c, i) => ({ time: c.time, value: vwap[i] })));
+}
